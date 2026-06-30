@@ -94,10 +94,13 @@ export const Header: React.FC<HeaderProps> = ({ onOpenSettings }) => {
           </div>
           <div className="flex flex-col">
             <h1 className="text-lg sm:text-xl font-extrabold font-display tracking-tight text-slate-50 flex items-center gap-2">
-              <span>The Last-Minute Life Saver</span>
+              <span>Priora</span>
               <span className="hidden md:inline-block text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">AI CORE</span>
             </h1>
-            <span className="text-xs text-slate-400 font-medium">{todayDisplay}</span>
+            <span className="text-xs text-slate-400 font-medium tracking-wide mt-0.5">
+              Never Miss What Matters.
+            </span>
+            <span className="text-[10px] text-slate-500 font-medium mt-0.5">{todayDisplay}</span>
           </div>
         </div>
 

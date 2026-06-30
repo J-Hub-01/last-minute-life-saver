@@ -1,5 +1,5 @@
 {
-  "name": "The Last-Minute Life Saver",
+  "name": "Priora",
   "description": "An AI-Powered Productivity Companion that makes sure you never miss what matters, featuring 80-90% AI time buffers, agentic scheduling, and smart conflict resolution.",
   "requestFramePermissions": ["microphone", "camera", "geolocation"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

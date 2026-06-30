@@ -276,7 +276,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
           {/* Section 7: About */}
           <div className="pt-6 flex flex-col gap-3 text-xs text-slate-400 font-mono">
             <h4 className="text-sm font-semibold uppercase tracking-wider text-indigo-400 font-mono flex items-center gap-2">
-              <Info className="w-4 h-4" /> About The Last-Minute Life Saver
+              <Info className="w-4 h-4" /> About Priora
             </h4>
             <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col gap-1.5 leading-relaxed">
               <p><strong className="text-slate-50">App Version:</strong> 2026.1.0-RC</p>

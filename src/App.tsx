@@ -143,7 +143,7 @@ export default function App() {
     if (newUser.calendarConnected) {
       handleRefreshCalendar();
     }
-    NotificationEngine.addToast({ title: 'Welcome Aboard! 🚀', message: `Glad to have you, ${newUser.name}. The Last-Minute Life Saver is active!`, type: 'info' });
+    NotificationEngine.addToast({ title: 'Welcome Aboard! 🚀', message: `Glad to have you, ${newUser.name}. Priora is active!`, type: 'info' });
   };
 
   const handleUpdateTasks = (tab: 'professional' | 'personal' | 'events' | 'wishlist', updatedList: TaskItem[]) => {
@@ -157,10 +157,12 @@ export default function App() {
   };
 
   const handleDeleteTask = async (tab: 'professional' | 'personal' | 'events' | 'wishlist', id: string) => {
+    console.log('App: handleDeleteTask called', tab, id);
     let taskTitle = 'Item';
     
     setTasks(prev => {
       const taskToDelete = prev[tab].find(t => t.id === id);
+      console.log('App: taskToDelete found', taskToDelete);
       if (taskToDelete) {
         taskTitle = taskToDelete.title;
         
@@ -181,12 +183,36 @@ export default function App() {
 
       const updated = prev[tab].filter(t => t.id !== id);
       Storage.setTasks(tab, updated);
+      console.log('App: Tasks updated in storage');
       return { ...prev, [tab]: updated };
     });
 
     Storage.removeCompleted(id);
     Storage.removeMissed(id);
     NotificationEngine.addToast({ title: 'Item Deleted', message: `Removed "${taskTitle}" successfully.`, type: 'info' });
+  };
+
+  const handleUpdateTask = async (tab: 'professional' | 'personal' | 'events' | 'wishlist', id: string, updates: Partial<TaskItem>) => {
+    console.log('App: handleUpdateTask called', tab, id, updates);
+    setTasks(prev => {
+      const taskToUpdate = prev[tab].find(t => t.id === id);
+      if (!taskToUpdate) return prev;
+
+      const hasDeadlineVal = updates.deadline !== undefined ? !!updates.deadline : taskToUpdate.hasDeadline;
+      const updatedTask = { ...taskToUpdate, ...updates, hasDeadline: hasDeadlineVal };
+      
+      if (tab === 'events' && updates.deadline) {
+        updatedTask.startTime = updates.deadline;
+      }
+      if (tab === 'wishlist' && updates.deadline) {
+        updatedTask.softDeadline = updates.deadline;
+      }
+
+      const updatedList = prev[tab].map(t => t.id === id ? updatedTask : t);
+      Storage.setTasks(tab, updatedList);
+      return { ...prev, [tab]: updatedList };
+    });
+    NotificationEngine.addToast({ title: 'Task Updated', message: 'Task has been updated.', type: 'success' });
   };
 
   const handleSaveSettings = (newSettings: AppSettings) => {
@@ -503,7 +529,7 @@ export default function App() {
       </div>
 
       {/* Multimodal AI Assistant (Floating Orb & Side Panel) */}
-      <AIAssistant tasks={tasks} onAcceptTasks={handleAIAcceptBatchTasks} />
+      <AIAssistant tasks={tasks} onAcceptTasks={handleAIAcceptBatchTasks} onDeleteTask={handleDeleteTask} onUpdateTask={handleUpdateTask} />
 
       {/* Global Toast Overlay */}
       <ToastContainer />
@@ -604,21 +630,25 @@ export default function App() {
             setTasks(prev => {
               const oldTab = activeEditTask?.tab;
               const newTab = finalTask.tab;
-
+              console.log('App: TaskModal onSave called', { isEditing, oldTab, newTab });
+              
               let updatedTasks = { ...prev };
 
               if (isEditing && oldTab && oldTab !== newTab) {
                 // Category changed: remove from old, add to new
+                console.log('App: Category changed');
                 updatedTasks[oldTab] = prev[oldTab].filter(t => t.id !== finalTask.id);
                 updatedTasks[newTab] = [finalTask, ...prev[newTab]];
                 Storage.setTasks(oldTab, updatedTasks[oldTab]);
                 Storage.setTasks(newTab, updatedTasks[newTab]);
               } else if (isEditing) {
                 // Same category: update in place
+                console.log('App: Task updated in place');
                 updatedTasks[newTab] = prev[newTab].map(t => t.id === finalTask.id ? finalTask : t);
                 Storage.setTasks(newTab, updatedTasks[newTab]);
               } else {
                 // New task: add to category
+                console.log('App: New task added');
                 updatedTasks[newTab] = [finalTask, ...prev[newTab]];
                 Storage.setTasks(newTab, updatedTasks[newTab]);
               }

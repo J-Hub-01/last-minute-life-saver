@@ -29,11 +29,18 @@ function getAIClient() {
   if (!apiKey) {
     apiKey = "AIzaSy_fake_api_key_for_demo"; // Provide a fallback so it doesn't throw instantly
   }
-  return new GoogleGenAI({ apiKey });
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      }
+    }
+  });
 }
 
 // System instructions for the Jarvis/Notion AI Assistant
-const ASSISTANT_SYSTEM_PROMPT = `You are "The Last-Minute Life Saver" AI Assistant — an elite, sophisticated personal productivity companion. Think Notion meets Jarvis. You are confident, futuristic, highly organized, proactive, and calm.
+const ASSISTANT_SYSTEM_PROMPT = `You are "Priora" AI Assistant — an elite, sophisticated personal productivity companion. Think Notion meets Jarvis. You are confident, futuristic, highly organized, proactive, and calm.
 
 When analyzing user requests, you have access to their existing tasks and schedule.
 You MUST output your response strictly as valid JSON matching this schema:
@@ -53,6 +60,20 @@ You MUST output your response strictly as valid JSON matching this schema:
     "conflictingTask": "Existing task title and time",
     "newProposal": "The new task title and time that conflicts",
     "suggestionText": "Smart advice on how to merge or resolve (e.g. combine errands on the same trip)"
+  },
+  "deleteTask": null | { // If user asks to delete a task, provide the task ID to delete or taskTitle.
+    "taskId": "ID of the task to delete (if available)",
+    "taskTitle": "Title of the task to delete"
+  },
+  "updateTask": null | { // If user asks to update a task or event (e.g. change target date, deadline, time, title, notes), provide the task ID or title and the new fields.
+    "taskId": "ID of the task to update (if available)",
+    "taskTitle": "Title of the task to update",
+    "updates": {
+       "title": "New title if changed",
+       "deadline": "New deadline/target date ISO string (e.g. '2026-12-31T23:59:59.000Z' if user mentions 'this year' or a date. Always map target date/deadline/due date updates here. NEVER put date changes in notes.)",
+       "timeOfDay": "New time of day HH:mm",
+       "notes": "New notes/description ONLY if user explicitly asked to change/add text notes. DO NOT write date changes or explanation of updates here."
+    }
   },
   "places": null | [ // If user asks for nearby cake shops, restaurants, or places
     {
@@ -94,16 +115,42 @@ SPECIAL BEHAVIOR RULES:
    Answer clearly and intelligently based on the document text provided in context.
 4. Always maintain your calm, capable Jarvis tone.`;
 
-// Helper to retry AI requests on rate limits (429)
-async function callAIWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000): Promise<any> {
+// Helper to retry AI requests on transient failures (429, 500, 502, 503, 504)
+async function callAIWithRetry(fn: () => Promise<any>, retries = 5, delay = 2000): Promise<any> {
   try {
     return await fn();
   } catch (err: any) {
-    // Check if err has code 429, or err.error.code is 429
-    const errorCode = err.code || (err.error && err.error.code) || (err.message && err.message.includes('429') ? 429 : null);
+    console.error('AI Request Error:', err);
     
-    if (errorCode === 429 && retries > 0) {
-      // Try to parse retry delay from error details
+    let errorCode = err.code || (err.error && err.error.code);
+    
+    // Try to parse error code from the error message if it's a JSON string
+    if (!errorCode && err.message) {
+      try {
+        const jsonMatch = err.message.match(/\{.*\}/s);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (parsed.error && parsed.error.code) {
+            errorCode = parsed.error.code;
+          }
+        }
+      } catch (e) {}
+    }
+    
+    // Fallback search in message string
+    if (!errorCode && err.message) {
+      if (err.message.includes('429')) errorCode = 429;
+      else if (err.message.includes('503') || err.message.includes('UNAVAILABLE')) errorCode = 503;
+      else if (err.message.includes('502')) errorCode = 502;
+      else if (err.message.includes('504')) errorCode = 504;
+      else if (err.message.includes('500')) errorCode = 500;
+    }
+    
+    const isTransient = errorCode === 429 || errorCode === 500 || errorCode === 502 || errorCode === 503 || errorCode === 504 || (typeof errorCode === 'number' && errorCode >= 500);
+    
+    if (isTransient && retries > 0) {
+      console.warn(`Transient error ${errorCode || 'unknown'}. Retrying in ${delay}ms... (Retries left: ${retries})`);
+      // Try to parse retry delay from error details if available
       let retryDelay = delay;
       if (err.details && Array.isArray(err.details)) {
         const retryInfo = err.details.find((d: any) => d['@type'] === 'type.googleapis.com/google.rpc.RetryInfo');
@@ -116,7 +163,7 @@ async function callAIWithRetry(fn: () => Promise<any>, retries = 5, delay = 5000
       }
 
       await new Promise(resolve => setTimeout(resolve, retryDelay));
-      return callAIWithRetry(fn, retries - 1, retryDelay * 2);
+      return callAIWithRetry(fn, retries - 1, retryDelay * 1.5);
     }
     throw err;
   }
@@ -136,10 +183,13 @@ app.post('/api/ai/chat', async (req, res) => {
       `- [${t.tab.toUpperCase()}] "${t.title}" ${t.deadline ? `(Deadline: ${t.deadline})` : ''} ${t.timeOfDay ? `(Time: ${t.timeOfDay})` : ''} [Completed: ${t.completed}]`
     ).join('\n');
 
-    const prompt = `CURRENT USER CONTEXT:\n${userContext || 'No specific context'}\n\nEXISTING TASKS & SCHEDULE:\n${scheduleSummary || 'No tasks scheduled yet.'}\n\nCONVERSATION HISTORY:\n${messages.map((m: any) => `${m.sender.toUpperCase()}: ${m.text}`).join('\n')}\n\nRespond as The Last-Minute Life Saver assistant in strict JSON matching the required schema.`;
+    const now = new Date();
+    const currentDateStr = now.toISOString() + " (Local context: " + now.toLocaleString() + ", Current Year: " + now.getFullYear() + ")";
+
+    const prompt = `CURRENT SYSTEM TIME & DATE:\n${currentDateStr}\n\nCURRENT USER CONTEXT:\n${userContext || 'No specific context'}\n\nEXISTING TASKS & SCHEDULE:\n${scheduleSummary || 'No tasks scheduled yet.'}\n\nCONVERSATION HISTORY:\n${messages.map((m: any) => `${m.sender.toUpperCase()}: ${m.text}`).join('\n')}\n\nRespond as Priora assistant in strict JSON matching the required schema.`;
 
     const response = await callAIWithRetry(() => ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       contents: prompt,
       config: {
         systemInstruction: ASSISTANT_SYSTEM_PROMPT,
@@ -181,6 +231,20 @@ You MUST output your response strictly as valid JSON matching this schema:
     "newProposal": "New task title and time that conflicts",
     "suggestionText": "Smart advice on how to merge or resolve (e.g. combine errands on same trip)"
   },
+  "deleteTask": null | { // If user asks to delete a task, provide the task ID to delete or taskTitle.
+    "taskId": "ID of the task to delete (if available)",
+    "taskTitle": "Title of the task to delete"
+  },
+  "updateTask": null | { // If user asks to update a task or event (e.g. change target date, deadline, time, title, notes), provide the task ID or title and the new fields.
+    "taskId": "ID of the task to update (if available)",
+    "taskTitle": "Title of the task to update",
+    "updates": {
+       "title": "New title if changed",
+       "deadline": "New deadline/target date ISO string (e.g. \'2026-12-31T23:59:59.000Z\' if user mentions \'this year\' or a date. Always map target date/deadline/due date/year updates here. NEVER put date changes or updates in the notes field!)",
+       "timeOfDay": "New time of day HH:mm",
+       "notes": "New notes/description ONLY if user explicitly asked to change/add text notes. DO NOT write date changes, year updates, or explanations of updates here."
+    }
+  },
   "places": null | [ // If user asks for nearby place or shop (in-person), provide top 3 results near Panvel / user location.
     {
       "id": "place_1",
@@ -214,7 +278,10 @@ app.post('/api/ai/assistant', async (req, res) => {
       fullUserText += `\n\nATTACHED/UPLOADED DOCUMENT CONTENT:\n${documentContent}`;
     }
 
-    const finalPrompt = `CURRENT USER SCHEDULE & TASKS:\n${scheduleSummary || 'No existing tasks scheduled yet.'}\n\nCONVERSATION HISTORY:\n${historyPrompt || 'None'}\n\n${fullUserText}\n\nAnalyze the request. If user clicks 'Get Suggestion' on conflict warning, generate smart resolution suggestion. If user asks for nearby shop/place, check if online or in-person; if in-person, return top 3 relevant places in "places". If user describes event/situation involving tasks, break into subtasks with smart time allocation in "proposals" and check for time conflicts. Return strict JSON matching the schema.`;
+    const now = new Date();
+    const currentDateStr = now.toISOString() + " (Local context: " + now.toLocaleString() + ", Current Year: " + now.getFullYear() + ")";
+
+    const finalPrompt = `CURRENT SYSTEM TIME & DATE:\n${currentDateStr}\n\nCURRENT USER SCHEDULE & TASKS:\n${scheduleSummary || 'No existing tasks scheduled yet.'}\n\nCONVERSATION HISTORY:\n${historyPrompt || 'None'}\n\n${fullUserText}\n\nAnalyze the request. If user clicks 'Get Suggestion' on conflict warning, generate smart resolution suggestion. If user asks for nearby shop/place, check if online or in-person; if in-person, return top 3 relevant places in "places". If user describes event/situation involving tasks, break into subtasks with smart time allocation in "proposals" and check for time conflicts. Return strict JSON matching the schema.`;
 
     const contents: any[] = [{ text: finalPrompt }];
     if (media && media.data && media.mimeType) {
@@ -223,7 +290,7 @@ app.post('/api/ai/assistant', async (req, res) => {
     }
 
     const response = await callAIWithRetry(() => ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       contents: contents,
       config: {
         systemInstruction: ASSISTANT_PANEL_SYSTEM_PROMPT,
@@ -236,13 +303,15 @@ app.post('/api/ai/assistant', async (req, res) => {
     try {
       parsed = JSON.parse(textOutput);
     } catch (e) {
-      parsed = { reply: textOutput };
+      console.error('AI Assistant JSON Parse Error:', e);
+      console.error('Raw Output:', textOutput);
+      parsed = { reply: "I had trouble processing that response. Could you rephrase it?" };
     }
 
     res.json(parsed);
   } catch (err: any) {
-    // console.error('AI Assistant Error:', err);
-    res.status(500).json({ reply: "I'm having trouble connecting to Gemini right now. Please try again in a moment." });
+    console.error('AI Assistant Critical Error:', err);
+    res.status(500).json({ reply: "I'm having trouble connecting to Gemini right now. Please check server logs for details." });
   }
 });
 
@@ -273,7 +342,7 @@ Return strict JSON:
 }`;
 
     const response = await callAIWithRetry(() => ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       contents: prompt,
       config: { responseMimeType: 'application/json' }
     }));
@@ -293,8 +362,8 @@ app.post('/api/ai/quote', async (req, res) => {
       return res.json({ quote: "Action is the foundational key to all success." });
     }
     const response = await callAIWithRetry(() => ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: `Generate a single short, inspiring, sophisticated motivational quote (under 20 words) for a productivity assistant app named "The Last-Minute Life Saver". Context: ${prompt || 'General focus'}. Return ONLY the quote text without quotes.`
+      model: 'gemini-3.5-flash',
+      contents: `Generate a single short, inspiring, sophisticated motivational quote (under 20 words) for a productivity assistant app named "Priora". Context: ${prompt || 'General focus'}. Return ONLY the quote text without quotes.`
     }));
     res.json({ quote: response.text?.trim() || "Action is the foundational key to all success." });
   } catch (err: any) {
@@ -316,7 +385,7 @@ app.post('/api/ai/buffer', async (req, res) => {
     const taskList = tasks.map((t: any) => `${t.title} (${t.estimatedMinutes || 1440} mins)`).join(', ');
 
     const response = await callAIWithRetry(() => ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       contents: `Analyze these tasks without deadlines: ${taskList}.
 Calculate an exact buffer percentage (between 80% and 90%) to save time.
 Return strict JSON:

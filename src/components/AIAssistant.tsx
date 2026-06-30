@@ -9,9 +9,14 @@ import { TaskItem, AIChatMessage, AITaskProposal, AIMapPlace, Attachment } from 
 import { Storage } from '../utils/storage';
 import { NotificationEngine } from '../utils/notifications';
 
+// Global reference to prevent garbage collection of speaking utterances in Chrome
+let activeUtterances: SpeechSynthesisUtterance[] = [];
+
 interface AIAssistantProps {
   tasks: Record<'professional' | 'personal' | 'events' | 'wishlist', TaskItem[]>;
   onAcceptTasks: (proposals: AITaskProposal[]) => void;
+  onDeleteTask: (tab: 'professional' | 'personal' | 'events' | 'wishlist', id: string) => void;
+  onUpdateTask: (tab: 'professional' | 'personal' | 'events' | 'wishlist', id: string, updates: Partial<TaskItem>) => void;
 }
 
 const THINKING_STATES = [
@@ -22,7 +27,7 @@ const THINKING_STATES = [
   'Reading your document...'
 ];
 
-export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }) => {
+export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks, onDeleteTask, onUpdateTask }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Array<AIChatMessage & { mediaUrl?: string; mediaType?: 'image' | 'video'; attachmentName?: string }>>([
     {
@@ -43,12 +48,19 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
   // 6 changes states
   const [mode, setMode] = useState<'text' | 'voice'>('text');
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const isSpeakingRef = useRef(false);
+
+  useEffect(() => {
+    isSpeakingRef.current = isSpeaking;
+  }, [isSpeaking]);
+
   const [isBackgroundListening, setIsBackgroundListening] = useState(false);
   const [showPulsingDot, setShowPulsingDot] = useState(false);
   const [micPermissionGranted, setMicPermissionGranted] = useState<boolean | null>(null);
 
   const backgroundRecognitionRef = useRef<any>(null);
   const utteranceRef = useRef<any>(null);
+  const activeSpeechSessionRef = useRef<string | null>(null);
   const isListeningRef = useRef(isListening);
   const isOpenRef = useRef(isOpen);
 
@@ -110,110 +122,330 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
 
   // Speech Synthesis (Voice output) with support for onEnd callback
   const speakText = (text: string, onEndCallback?: () => void) => {
+    console.log('Jarvis TTS Lifecycle: speakText called with text:', text);
     if (!('speechSynthesis' in window)) {
+      console.log('Jarvis: speechSynthesis not supported');
       if (onEndCallback) onEndCallback();
       return;
     }
 
-    window.speechSynthesis.cancel();
-    setIsSpeaking(false);
+    // Generate a unique speech session ID for this speak request
+    const sessionId = Date.now().toString() + '-' + Math.random().toString();
+    activeSpeechSessionRef.current = sessionId;
+
+    // Set speaking states immediately to prevent race conditions
+    setIsSpeaking(true);
+    isSpeakingRef.current = true;
+
+    // Temporarily pause SpeechRecognition during speech synthesis
+    if (activeTalkRecognitionRef.current) {
+      console.log('Jarvis TTS: Pausing activeTalkRecognition because speech started');
+      try {
+        activeTalkRecognitionRef.current.onend = null;
+        activeTalkRecognitionRef.current.onerror = null;
+        activeTalkRecognitionRef.current.stop();
+      } catch (e) {
+        console.warn('Jarvis TTS: Error stopping activeTalkRecognition', e);
+      }
+      activeTalkRecognitionRef.current = null;
+    }
+
+    if (backgroundRecognitionRef.current) {
+      console.log('Jarvis TTS: Pausing backgroundRecognition because speech started');
+      try {
+        backgroundRecognitionRef.current.onend = null;
+        backgroundRecognitionRef.current.onerror = null;
+        backgroundRecognitionRef.current.stop();
+      } catch (e) {
+        console.warn('Jarvis TTS: Error stopping backgroundRecognition', e);
+      }
+      backgroundRecognitionRef.current = null;
+    }
+
+    setIsListening(false);
+
+    // Detach listeners from any previously active utterance so they don't fire stale events
+    if (utteranceRef.current) {
+      console.log('Jarvis TTS: Detaching event listeners from previous utterance');
+      try {
+        utteranceRef.current.onstart = null;
+        utteranceRef.current.onend = null;
+        utteranceRef.current.onerror = null;
+      } catch (e) {}
+      utteranceRef.current = null;
+    }
+
+    // Only cancel if there is active or pending speech to avoid corrupting speech engine state
+    const isCurrentlySpeaking = window.speechSynthesis.speaking || window.speechSynthesis.pending;
+    if (isCurrentlySpeaking) {
+      console.log('Jarvis TTS: Speech is active or pending, cancelling previous speech safely');
+      window.speechSynthesis.cancel();
+    } else {
+      console.log('Jarvis TTS: No active/pending speech. Skipping cancel call to prevent engine freeze.');
+    }
+
+    // Unstuck browser TTS engine if it got paused
+    try {
+      window.speechSynthesis.resume();
+    } catch (e) {
+      console.warn('Jarvis TTS: Error resuming speechSynthesis', e);
+    }
 
     // Clean markdown
     const plainText = text
       .replace(/[*#_`~]/g, '')
       .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
 
-    const utterance = new SpeechSynthesisUtterance(plainText);
-    utteranceRef.current = utterance;
+    // Split plainText into chunks of maximum ~140 characters, trying to split at sentence/clause boundaries if possible.
+    const getChunks = (txt: string, maxLen = 140): string[] => {
+      const rawSentences = txt.split(/([.!?]+(?:\s+|$))/g);
+      const res: string[] = [];
+      let currentChunk = '';
 
-    utterance.rate = 0.95;
-    utterance.pitch = 1.0;
-    utterance.lang = 'en-US';
+      for (let i = 0; i < rawSentences.length; i++) {
+        const segment = rawSentences[i];
+        if (!segment) continue;
 
-    let hasAssigned = false;
-    const assignVoiceAndSpeak = () => {
-      if (hasAssigned) return;
-      hasAssigned = true;
-      const voices = window.speechSynthesis.getVoices();
-      const maleKeywords = ['male', 'david', 'daniel', 'alex', 'google uk english male', 'george', 'fred', 'james', 'richard'];
-      let preferredVoice = voices.find(v => {
-        const nameLower = v.name.toLowerCase();
-        return v.lang.startsWith('en') && maleKeywords.some(keyword => nameLower.includes(keyword));
-      });
-      if (!preferredVoice) {
-        preferredVoice = voices.find(v => v.lang.startsWith('en'));
-      }
-      if (!preferredVoice && voices.length > 0) {
-        preferredVoice = voices[0];
-      }
-      if (preferredVoice) {
-        console.log('Jarvis: Using voice:', preferredVoice.name);
-        utterance.voice = preferredVoice;
-      } else {
-        console.log('Jarvis: No voice found');
-      }
-
-      let hasFiredEnd = false;
-      const fireEndCallback = () => {
-        if (!hasFiredEnd) {
-          hasFiredEnd = true;
-          setIsSpeaking(false);
-          if (onEndCallback) onEndCallback();
+        if ((currentChunk + segment).length > maxLen) {
+          if (currentChunk.trim()) {
+            res.push(currentChunk.trim());
+          }
+          currentChunk = segment;
+        } else {
+          currentChunk += segment;
         }
-      };
+      }
+      if (currentChunk.trim()) {
+        res.push(currentChunk.trim());
+      }
 
-      // Set immediately to prevent wake word from restarting during the delay
-      setIsSpeaking(true);
-
-      utterance.onstart = () => {
-        setIsSpeaking(true);
-      };
-
-      utterance.onend = () => {
-        fireEndCallback();
-      };
-
-      utterance.onerror = (e) => {
-        // console.warn('SpeechSynthesis error:', e);
-        fireEndCallback();
-      };
-
-      // Slight delay to fix Chrome bug where cancel() immediately before speak() drops the utterance
-      setTimeout(() => {
-        window.speechSynthesis.speak(utterance);
-      }, 50);
-      
-      // Safety fallback: if speech synthesis gets stuck, fire the callback anyway after a timeout
-      const estimatedTimeMs = Math.max(2000, plainText.length * 100);
-      setTimeout(() => {
-        if (!hasFiredEnd) {
-          // console.warn('Speech synthesis onend never fired. Triggering callback fallback.');
-          fireEndCallback();
+      // If any single chunk is still too long (e.g. no punctuation), split it by words
+      const finalChunks: string[] = [];
+      for (const chunk of res) {
+        if (chunk.length > maxLen) {
+          const words = chunk.split(/\s+/);
+          let subChunk = '';
+          for (const w of words) {
+            if ((subChunk + ' ' + w).length > maxLen) {
+              if (subChunk.trim()) finalChunks.push(subChunk.trim());
+              subChunk = w;
+            } else {
+              subChunk = subChunk ? subChunk + ' ' + w : w;
+            }
+          }
+          if (subChunk.trim()) finalChunks.push(subChunk.trim());
+        } else {
+          finalChunks.push(chunk);
         }
-      }, estimatedTimeMs + 100);
+      }
+
+      return finalChunks.filter(Boolean);
     };
 
-    if (window.speechSynthesis.getVoices().length === 0) {
-      const handleVoicesChanged = () => {
-        assignVoiceAndSpeak();
-        window.speechSynthesis.removeEventListener('voiceschanged', handleVoicesChanged);
-      };
-      window.speechSynthesis.addEventListener('voiceschanged', handleVoicesChanged);
-      // Fallback if event doesn't fire
-      setTimeout(() => {
-        if (!hasAssigned) {
-          assignVoiceAndSpeak();
+    const chunks = getChunks(plainText);
+    console.log('Jarvis TTS: Text split into', chunks.length, 'chunks:', chunks);
+
+    if (chunks.length === 0) {
+      console.log('Jarvis TTS: Empty text, firing end callback immediately');
+      setIsSpeaking(false);
+      isSpeakingRef.current = false;
+      if (onEndCallback) onEndCallback();
+      else if (isTalkModeActiveRef.current) startActiveTalkListening();
+      else startWakeWordListener();
+      return;
+    }
+
+    let currentChunkIndex = 0;
+
+    const speakNextChunk = () => {
+      if (activeSpeechSessionRef.current !== sessionId) {
+        console.log('Jarvis TTS: Aborting next chunk because session changed');
+        return;
+      }
+
+      if (currentChunkIndex >= chunks.length) {
+        console.log('Jarvis TTS: All chunks played successfully');
+        // Clean up from global activeUtterances array
+        activeUtterances = activeUtterances.filter(u => u !== utteranceRef.current);
+        utteranceRef.current = null;
+
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+
+        if (onEndCallback) {
+          console.log('Jarvis TTS: Triggering custom onEndCallback');
+          onEndCallback();
+        } else {
+          console.log('Jarvis TTS: No custom callback. Resuming appropriate listener');
+          if (isTalkModeActiveRef.current) {
+            startActiveTalkListening();
+          } else {
+            startWakeWordListener();
+          }
         }
-      }, 500);
+        return;
+      }
+
+      const chunkText = chunks[currentChunkIndex];
+      console.log(`Jarvis TTS: Playing chunk ${currentChunkIndex + 1}/${chunks.length}: "${chunkText}"`);
+
+      const utterance = new SpeechSynthesisUtterance(chunkText);
+      utteranceRef.current = utterance;
+
+      // Prevent garbage collection
+      activeUtterances.push(utterance);
+
+      utterance.rate = 0.95;
+      utterance.pitch = 1.0;
+      utterance.lang = 'en-US';
+
+      let hasAssigned = false;
+      const assignVoiceAndSpeak = () => {
+        if (hasAssigned) return;
+        hasAssigned = true;
+
+        const voices = window.speechSynthesis.getVoices();
+        const maleKeywords = ['male', 'david', 'daniel', 'alex', 'george', 'fred', 'james', 'richard'];
+        
+        // Filter English voices
+        const englishVoices = voices.filter(v => v.lang.toLowerCase().startsWith('en'));
+        
+        // Prioritize local service voices (offline-capable) to avoid iframe network blockages in Chrome sandbox
+        const localEnglishVoices = englishVoices.filter(v => v.localService === true || v.localService === undefined);
+        
+        let preferredVoice: SpeechSynthesisVoice | undefined;
+        
+        if (localEnglishVoices.length > 0) {
+          // Find local male voice if possible
+          preferredVoice = localEnglishVoices.find(v => {
+            const nameLower = v.name.toLowerCase();
+            return maleKeywords.some(keyword => nameLower.includes(keyword));
+          });
+          // Fall back to any local English voice
+          if (!preferredVoice) {
+            preferredVoice = localEnglishVoices[0];
+          }
+        }
+        
+        // Fall back to general English voices (network ones) if no local English voices exist
+        if (!preferredVoice && englishVoices.length > 0) {
+          preferredVoice = englishVoices.find(v => {
+            const nameLower = v.name.toLowerCase();
+            return maleKeywords.some(keyword => nameLower.includes(keyword));
+          });
+          if (!preferredVoice) {
+            preferredVoice = englishVoices[0];
+          }
+        }
+        
+        // Ultimate fallback
+        if (!preferredVoice && voices.length > 0) {
+          preferredVoice = voices[0];
+        }
+
+        if (preferredVoice) {
+          console.log(`Jarvis TTS: Selected voice "${preferredVoice.name}" (Lang: ${preferredVoice.lang}, LocalService: ${preferredVoice.localService})`);
+          utterance.voice = preferredVoice;
+        }
+
+        let hasFiredEnd = false;
+        const fireEndCallback = () => {
+          if (activeSpeechSessionRef.current !== sessionId) {
+            return;
+          }
+          // Remove from global activeUtterances array
+          activeUtterances = activeUtterances.filter(u => u !== utterance);
+
+          if (!hasFiredEnd) {
+            hasFiredEnd = true;
+            console.log(`Jarvis TTS: Chunk ${currentChunkIndex + 1} finished.`);
+            currentChunkIndex++;
+            speakNextChunk();
+          }
+        };
+
+        utterance.onstart = () => {
+          if (activeSpeechSessionRef.current !== sessionId) return;
+          setIsSpeaking(true);
+          isSpeakingRef.current = true;
+        };
+
+        utterance.onend = () => {
+          fireEndCallback();
+        };
+
+        utterance.onerror = (e) => {
+          console.warn(`Jarvis TTS: Chunk error [Code: ${e.error}]`, e);
+          fireEndCallback();
+        };
+
+        // Small delay between chunks to let Chrome settle its internal state machine
+        setTimeout(() => {
+          if (activeSpeechSessionRef.current !== sessionId) return;
+          window.speechSynthesis.speak(utterance);
+        }, 50);
+
+        // Safety fallback per chunk: wait a reasonable amount of time based on chunk length
+        const estimatedTimeMs = Math.max(2500, chunkText.length * 150);
+        setTimeout(() => {
+          if (activeSpeechSessionRef.current === sessionId && !hasFiredEnd) {
+            console.warn('Jarvis TTS: Chunk onend never fired. Falling back to next chunk.');
+            fireEndCallback();
+          }
+        }, estimatedTimeMs);
+      };
+
+      if (window.speechSynthesis.getVoices().length === 0) {
+        const handleVoicesChanged = () => {
+          if (activeSpeechSessionRef.current === sessionId) {
+            assignVoiceAndSpeak();
+          }
+          window.speechSynthesis.removeEventListener('voiceschanged', handleVoicesChanged);
+        };
+        window.speechSynthesis.addEventListener('voiceschanged', handleVoicesChanged);
+        setTimeout(() => {
+          if (activeSpeechSessionRef.current === sessionId && !hasAssigned) {
+            assignVoiceAndSpeak();
+          }
+        }, 500);
+      } else {
+        assignVoiceAndSpeak();
+      }
+    };
+
+    // Start speaking first chunk with a delay if we had to cancel active speech, giving Chrome time to settle
+    if (isCurrentlySpeaking) {
+      console.log('Jarvis TTS: Waiting 300ms for cancel to settle before playing first chunk');
+      setTimeout(() => {
+        if (activeSpeechSessionRef.current === sessionId) {
+          speakNextChunk();
+        }
+      }, 300);
     } else {
-      assignVoiceAndSpeak();
+      speakNextChunk();
     }
   };
 
   const stopSpeaking = () => {
     if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
+      console.log('Jarvis TTS: stopSpeaking called, cancelling active speech synthesis');
+      activeSpeechSessionRef.current = null;
+      if (utteranceRef.current) {
+        try {
+          utteranceRef.current.onstart = null;
+          utteranceRef.current.onend = null;
+          utteranceRef.current.onerror = null;
+        } catch (e) {}
+        // Remove from global activeUtterances
+        activeUtterances = activeUtterances.filter(u => u !== utteranceRef.current);
+        utteranceRef.current = null;
+      }
+      try {
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.resume();
+      } catch (e) {}
       setIsSpeaking(false);
+      isSpeakingRef.current = false;
     }
   };
 
@@ -227,6 +459,10 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
   const startActiveTalkListening = () => {
     if (!isTalkModeActiveRef.current) return;
     if (isProcessingSpeechRef.current) return;
+    if (isSpeakingRef.current) {
+      console.log('Jarvis TTS: startActiveTalkListening blocked because speech is active');
+      return;
+    }
 
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) return;
@@ -409,9 +645,9 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
       rec.onend = () => {
         setIsListening(false);
         // If we haven't processed a result (and therefore we aren't about to speak), restart listening!
-        if (!hasProcessedResult && isTalkModeActiveRef.current && !isProcessingSpeechRef.current) {
+        if (!hasProcessedResult && isTalkModeActiveRef.current && !isProcessingSpeechRef.current && !isSpeakingRef.current) {
           setTimeout(() => {
-            if (isTalkModeActiveRef.current && !isProcessingSpeechRef.current) {
+            if (isTalkModeActiveRef.current && !isProcessingSpeechRef.current && !isSpeakingRef.current) {
               startActiveTalkListening();
             }
           }, 300);
@@ -424,9 +660,9 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
         }
         setIsListening(false);
         // If error occurred and we aren't processing/speaking, restart to continue listening
-        if (!hasProcessedResult && isTalkModeActiveRef.current && !isProcessingSpeechRef.current) {
+        if (!hasProcessedResult && isTalkModeActiveRef.current && !isProcessingSpeechRef.current && !isSpeakingRef.current) {
           setTimeout(() => {
-            if (isTalkModeActiveRef.current && !isProcessingSpeechRef.current) {
+            if (isTalkModeActiveRef.current && !isProcessingSpeechRef.current && !isSpeakingRef.current) {
               startActiveTalkListening();
             }
           }, 1000);
@@ -520,6 +756,11 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
       return;
     }
 
+    if (isSpeakingRef.current) {
+      console.log('Jarvis TTS: startWakeWordListener blocked because speech is active');
+      return;
+    }
+
     if (backgroundRecognitionRef.current) {
       try {
         backgroundRecognitionRef.current.onend = null;
@@ -535,14 +776,17 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
       rec.lang = 'en-US';
 
       rec.onstart = () => {
+        console.log('Jarvis: Wake word listener started');
         setIsBackgroundListening(true);
         setShowPulsingDot(true);
       };
 
       rec.onresult = (event: any) => {
+        console.log('Jarvis: Wake word listener result');
         const resultsLen = event.results.length;
         for (let i = event.resultIndex; i < resultsLen; i++) {
           const transcript = event.results[i][0].transcript.toLowerCase();
+          console.log('Jarvis: Wake word transcript:', transcript);
           // Match 'hey jarvis', 'jarvis', 'hi jarvis', 'ok jarvis', or 'okay jarvis'
           if (
             transcript.includes('hey jarvis') || 
@@ -553,9 +797,9 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
             transcript.includes('okay jarvis') ||
             transcript.includes('jarvis')
           ) {
+            console.log('Jarvis: Wake word detected!');
             // Wake word detected! Trigger Talk Mode instead of opening panel initially
             setIsTalkModeActive(true);
-            setIsOpen(false);
             
             // Clear wake word: stop current listener
             rec.onend = null;
@@ -573,9 +817,9 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
       rec.onend = () => {
         setIsBackgroundListening(false);
         // Auto-restart on end if not active listening and not talk mode
-        if (!isListeningRef.current && !isTalkModeActiveRef.current) {
+        if (!isListeningRef.current && !isTalkModeActiveRef.current && !isSpeakingRef.current) {
           setTimeout(() => {
-            if (!isListeningRef.current && !isTalkModeActiveRef.current) {
+            if (!isListeningRef.current && !isTalkModeActiveRef.current && !isSpeakingRef.current) {
               startWakeWordListener();
             }
           }, 300);
@@ -592,9 +836,9 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
           return;
         }
         // Auto-restart on error
-        if (!isListeningRef.current && !isTalkModeActiveRef.current) {
+        if (!isListeningRef.current && !isTalkModeActiveRef.current && !isSpeakingRef.current) {
           setTimeout(() => {
-            if (!isListeningRef.current && !isTalkModeActiveRef.current) {
+            if (!isListeningRef.current && !isTalkModeActiveRef.current && !isSpeakingRef.current) {
               startWakeWordListener();
             }
           }, 1000);
@@ -660,7 +904,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
   }, []);
 
   useEffect(() => {
-    if (micPermissionGranted === true && !isListening && !isTalkModeActive && !isSpeaking) {
+    if (micPermissionGranted === true && !isTalkModeActive && !isSpeaking) {
       if (!isBackgroundListening) {
         startWakeWordListener();
       }
@@ -676,7 +920,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
         setShowPulsingDot(false);
       }
     }
-  }, [micPermissionGranted, isListening, isTalkModeActive, isSpeaking]);
+  }, [micPermissionGranted, isTalkModeActive, isSpeaking]);
 
   // Gather all existing attachments across tasks
   const existingAttachments: Array<{ attachment: Attachment; taskTitle: string; tab: string }> = [];
@@ -759,6 +1003,12 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
         })
       });
 
+      if (!res.ok) {
+        const errorText = await res.text();
+        console.error('Jarvis: API request failed', res.status, errorText);
+        throw new Error(`API request failed: ${res.status}`);
+      }
+
       const data = await res.json();
       setIsLoading(false);
 
@@ -777,8 +1027,56 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
 
       setMessages(prev => [...prev, newAiMsg]);
 
-      if (mode === 'voice' || isVoiceReply) {
+      if (data.deleteTask && (data.deleteTask.taskId || data.deleteTask.taskTitle)) {
+        console.log('Jarvis: Delete task intent detected:', data.deleteTask);
+        let foundTab = null;
+        let foundTaskId = data.deleteTask.taskId;
+        
+        for (const [tab, taskList] of Object.entries(tasks)) {
+           let task = (taskList as any[]).find(t => t.id === foundTaskId);
+           if (!task && data.deleteTask.taskTitle) {
+               task = (taskList as any[]).find(t => t.title.toLowerCase() === data.deleteTask.taskTitle.toLowerCase());
+               if (task) foundTaskId = task.id;
+           }
+           if (task) {
+             foundTab = tab;
+             break;
+           }
+        }
+        console.log('Jarvis: Found tab and task ID for deletion:', foundTab, foundTaskId);
+        if (foundTab && foundTaskId) {
+          onDeleteTask(foundTab as any, foundTaskId);
+        }
+      }
+
+      if (data.updateTask && (data.updateTask.taskId || data.updateTask.taskTitle) && data.updateTask.updates) {
+        console.log('Jarvis: Update task intent detected:', data.updateTask);
+        let foundTab = null;
+        let foundTaskId = data.updateTask.taskId;
+        
+        for (const [tab, taskList] of Object.entries(tasks)) {
+           let task = (taskList as any[]).find(t => t.id === foundTaskId);
+           if (!task && data.updateTask.taskTitle) {
+               task = (taskList as any[]).find(t => t.title.toLowerCase() === data.updateTask.taskTitle.toLowerCase());
+               if (task) foundTaskId = task.id;
+           }
+           if (task) {
+             foundTab = tab;
+             break;
+           }
+        }
+        console.log('Jarvis: Found tab and task ID for update:', foundTab, foundTaskId);
+        if (foundTab && foundTaskId) {
+          onUpdateTask(foundTab as any, foundTaskId, data.updateTask.updates);
+        }
+      }
+
+      if (aiReplyText && aiReplyText.trim().length > 0) {
         speakText(aiReplyText);
+      }
+
+      if ((data.proposals && data.proposals.length > 0) || data.conflictWarning) {
+        setIsOpen(true);
       }
 
       if (data.places && data.places.length > 0) {
@@ -793,7 +1091,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
         text: errorText,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       }]);
-      if (mode === 'voice' || isVoiceReply) {
+      if (errorText) {
         speakText(errorText);
       }
     }
@@ -817,6 +1115,10 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ tasks, onAcceptTasks }
     }
 
     if (isListening) return;
+    if (isSpeakingRef.current) {
+      console.log('Jarvis TTS: startVoiceInput blocked because speech is active');
+      return;
+    }
 
     if (backgroundRecognitionRef.current) {
       try {
