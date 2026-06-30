@@ -217,7 +217,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
                 { id: 'missedAlerts', label: 'Missed task alerts' },
                 { id: 'eventReminders', label: 'Event reminders (25 hr & 1 hr)' },
                 { id: 'wishlistNudge', label: 'Wishlist weekly motivational nudge' },
-                { id: 'aiActions', label: 'AI Assistant action notifications' },
+                { id: 'aiActions', label: 'Jarvis ✨ action notifications' },
                 { id: 'birthdayWish', label: 'Birthday celebration modal' },
               ].map((notif) => (
                 <label key={notif.id} className="flex items-center justify-between p-3 rounded-xl bg-slate-900/80 border border-slate-800 cursor-pointer hover:border-slate-700 transition-colors">

@@ -181,7 +181,7 @@ export const ProfessionalTab: React.FC<ProfessionalTabProps> = ({
     if (diffHours <= 24) {
       const hrsMins = `${Math.floor(diffHours)}h ${Math.floor((diffHours % 1) * 60)}m`;
       return (
-        <span className="px-2.5 py-0.5 rounded-full bg-rose-500 text-slate-50 shadow-[0_0_12px_rgba(244,63,94,0.8)] text-[12px] font-mono font-bold animate-pulse">
+        <span className="px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[12px] font-mono font-bold animate-soft-pulse">
           ⏰ {hrsMins} remaining
         </span>
       );
@@ -244,6 +244,7 @@ export const ProfessionalTab: React.FC<ProfessionalTabProps> = ({
 
         <div className="flex items-center gap-3">
           <button
+            id="ai-sort-button"
             onClick={handleAISort}
             disabled={isSorting || activeTasks.length === 0}
             className="px-6 py-3 rounded-xl bg-gradient-to-r from-indigo-600 via-purple-600 to-cyan-500 hover:from-indigo-500 hover:to-cyan-400 disabled:opacity-50 text-white font-bold text-sm shadow-[0_0_25px_rgba(99,102,241,0.4)] hover:shadow-[0_0_35px_rgba(34,211,238,0.6)] transition-all flex items-center justify-center gap-2 group shrink-0 cursor-pointer"
@@ -511,7 +512,7 @@ export const ProfessionalTab: React.FC<ProfessionalTabProps> = ({
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      <button onClick={() => onOpenEditModal(task)} className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs">Reschedule</button>
+                      <button onClick={() => onOpenEditModal(task)} className="reschedule-btn px-3 py-1.5 rounded-xl font-bold text-xs">Reschedule</button>
                       <button onClick={() => handleDelete(task.id)} className="p-1.5 rounded-xl hover:bg-rose-900/50 text-rose-400 hover:text-slate-50"><Trash2 className="w-4 h-4" /></button>
                     </div>
                   </div>

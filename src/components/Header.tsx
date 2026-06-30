@@ -124,9 +124,11 @@ export const Header: React.FC<HeaderProps> = ({ onOpenSettings }) => {
           <div
             onClick={onOpenSettings}
             title={user?.name || 'Alex Rivera'}
-            className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-mono font-bold text-sm cursor-pointer shadow-md hover:ring-2 hover:ring-indigo-400 transition-all shrink-0"
+            className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center cursor-pointer shadow-md hover:ring-2 hover:ring-indigo-400 transition-all shrink-0"
           >
-            {getInitials(user?.name || 'Jarvis Rivera')}
+            <span id="profile-initials" className="text-white font-mono font-bold text-sm select-none">
+              {getInitials(user?.name || 'Jarvis Rivera')}
+            </span>
           </div>
         </div>
       </div>

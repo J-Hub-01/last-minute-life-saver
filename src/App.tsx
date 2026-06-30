@@ -10,6 +10,7 @@ import { OnboardingModal } from './components/OnboardingModal';
 import { BirthdayModal } from './components/BirthdayModal';
 import { SettingsModal } from './components/SettingsModal';
 import { ToastContainer } from './components/ToastContainer';
+import { AIAssistant } from './components/AIAssistant';
 
 import { TaskModal } from './components/modals/TaskModal';
 
@@ -83,6 +84,17 @@ export default function App() {
       wishlist: Storage.getTasks('wishlist')
     });
   };
+
+  // Keep DOM classes in sync with settings theme
+  useEffect(() => {
+    if (settings.theme === 'dark') {
+      document.documentElement.classList.add('dark');
+      document.documentElement.classList.remove('light');
+    } else {
+      document.documentElement.classList.add('light');
+      document.documentElement.classList.remove('dark');
+    }
+  }, [settings.theme]);
 
   // Notification engine loop
   useEffect(() => {
@@ -222,6 +234,10 @@ export default function App() {
     const updated = [newItem, ...currList];
     handleUpdateTasks(tab, updated);
     NotificationEngine.addToast({ title: 'AI Task Added ⚡', message: `Added "${proposal.title}" to ${tab.toUpperCase()} tab.`, type: 'success' });
+  };
+
+  const handleAIAcceptBatchTasks = (proposals: AITaskProposal[]) => {
+    proposals.forEach(p => handleAICreateTask(p));
   };
 
   const handleAISortTasks = (sortedProfessional: TaskItem[]) => {
@@ -399,11 +415,20 @@ export default function App() {
   })();
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500 selection:text-slate-50 relative overflow-x-hidden">
-      {/* Background radial glow */}
+    <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#0A0F1E] text-slate-900 dark:text-slate-100 flex flex-col font-sans selection:bg-indigo-500 selection:text-slate-50 relative overflow-x-hidden transition-colors duration-300">
+      {/* Ambient background orbs */}
       <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
-        <div className="absolute top-[-10%] left-[20%] w-[600px] h-[600px] bg-indigo-600/10 rounded-full blur-[140px]" />
-        <div className="absolute bottom-[10%] right-[-5%] w-[500px] h-[500px] bg-cyan-600/10 rounded-full blur-[140px]" />
+        {settings.theme === 'dark' ? (
+          <>
+            <div className="absolute top-[-100px] left-[-100px] w-[600px] h-[600px] bg-indigo-600/[0.05] rounded-full blur-[140px]" />
+            <div className="absolute bottom-[-100px] right-[-100px] w-[500px] h-[500px] bg-cyan-500/[0.04] rounded-full blur-[140px]" />
+          </>
+        ) : (
+          <>
+            <div className="absolute top-[-100px] left-[-100px] w-[600px] h-[600px] bg-indigo-600/[0.03] rounded-full blur-[140px]" />
+            <div className="absolute bottom-[-100px] right-[-100px] w-[500px] h-[500px] bg-cyan-500/[0.02] rounded-full blur-[140px]" />
+          </>
+        )}
       </div>
 
       <div className="relative z-10 flex flex-col min-h-screen">
@@ -476,6 +501,9 @@ export default function App() {
 
         <Footer />
       </div>
+
+      {/* Multimodal AI Assistant (Floating Orb & Side Panel) */}
+      <AIAssistant tasks={tasks} onAcceptTasks={handleAIAcceptBatchTasks} />
 
       {/* Global Toast Overlay */}
       <ToastContainer />

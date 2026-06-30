@@ -79,7 +79,7 @@ export const NotificationEngine = {
     if (!settings.notifications.aiActions) return;
 
     this.addToast({
-      title: '✅ AI Assistant Autonomous Action',
+      title: 'Jarvis ✨',
       message: summary,
       type: 'ai'
     });

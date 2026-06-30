@@ -515,7 +515,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
             <div className="flex flex-col gap-2">
               <label className="cursor-pointer flex items-center justify-center gap-2 p-3 rounded-xl border border-dashed border-slate-700 hover:border-indigo-500 bg-slate-900/50 text-slate-400 hover:text-slate-50 transition-all text-xs">
                 <Paperclip className="w-4 h-4 text-indigo-400" />
-                <span>Upload PDF, DOC, or TXT for AI Assistant analysis</span>
+                <span>Upload PDF, DOC, or TXT for Jarvis ✨ analysis</span>
                 <input type="file" multiple onChange={handleFileUpload} className="hidden" />
               </label>
 
